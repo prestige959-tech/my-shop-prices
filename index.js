@@ -13,22 +13,29 @@ async function loadProducts() {
   return await csv().fromString(data);
 }
 
+/* ---------- OpenRouter + Kimi-K2 ---------- */
 async function askOpenRouter(messages) {
-  const res = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-    model: 'moonshot/kimi-latest',
-    messages,
-    temperature: 0.3
-  }, {
-    headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'HTTP-Referer': 'https://railway.app',
-      'X-Title': 'Facebook Price Bot'
+  const res = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
+      model: 'moonshot/kimi-latest',
+      messages,
+      temperature: 0.3,
+      max_tokens: 150
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'HTTP-Referer': 'https://railway.app',
+        'X-Title': 'Facebook Price Bot'
+      },
+      timeout: 4000
     }
-  });
+  );
   return res.data.choices[0].message.content;
 }
 
-// FB webhook verification
+/* ---------- Facebook Webhooks ---------- */
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -38,7 +45,6 @@ app.get('/webhook', (req, res) => {
     : res.sendStatus(403);
 });
 
-// Handle incoming messages
 app.post('/webhook', async (req, res) => {
   const entry = req.body.entry?.[0];
   if (!entry) return res.sendStatus(200);
@@ -48,7 +54,13 @@ app.post('/webhook', async (req, res) => {
   const userId = messaging.sender.id;
   const text = messaging.message.text.trim();
 
-  const products = await loadProducts();
+  let products;
+  try {
+    products = await loadProducts();
+  } catch (e) {
+    return res.sendStatus(200); // fail silently, FB will retry
+  }
+
   const prompt = `
 You are a Thai sales assistant.
 User: "${text}"
@@ -61,20 +73,34 @@ Reply in Thai.
 - Otherwise → politely ask for clarification.
 `;
 
-  const reply = await askOpenRouter([
-    { role: 'system', content: prompt },
-    { role: 'user', content: text }
-  ]);
+  let reply;
+  try {
+    reply = await askOpenRouter([
+      { role: 'system', content: prompt },
+      { role: 'user', content: text }
+    ]);
+  } catch (e) {
+    reply = 'ขอโทษค่ะ ระบบชั่วคราว กรุณาลองใหม่';
+  }
 
-  await axios.post(`https://graph.facebook.com/v19.0/me/messages`, {
-    recipient: { id: userId },
-    message: { text: reply }
-  }, {
-    params: { access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN }
-  });
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/me/messages`,
+      {
+        recipient: { id: userId },
+        message: { text: reply }
+      },
+      {
+        params: { access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN }
+      }
+    );
+  } catch (_) {
+    /* ignore FB errors */
+  }
 
   res.sendStatus(200);
 });
 
+/* ---------- Start server ---------- */
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`🚀 Bot listening on ${port}`));
