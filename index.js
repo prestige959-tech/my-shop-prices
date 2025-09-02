@@ -13,12 +13,11 @@ async function loadProducts() {
   return await csv().fromString(data);
 }
 
-/* ---------- OpenRouter + Kimi-K2 ---------- */
 async function askOpenRouter(messages) {
   const res = await axios.post(
     'https://openrouter.ai/api/v1/chat/completions',
     {
-      model: 'moonshot/kimi-latest',
+      model: 'moonshot/kimi-latest',   // ← explicit Kimi-K2
       messages,
       temperature: 0.3,
       max_tokens: 150
@@ -32,7 +31,7 @@ async function askOpenRouter(messages) {
       timeout: 4000
     }
   );
-  return res.data.choices[0].message.content;
+  return res.data.choices[0].message.content.trim();
 }
 
 /* ---------- Facebook Webhooks ---------- */
@@ -57,50 +56,42 @@ app.post('/webhook', async (req, res) => {
   let products;
   try {
     products = await loadProducts();
-  } catch (e) {
-    return res.sendStatus(200); // fail silently, FB will retry
+  } catch {
+    return res.sendStatus(200);
   }
 
   const prompt = `
-You are a Thai sales assistant.
+You are a friendly Thai sales assistant named Bot-Kimi.
 User: "${text}"
-Available products (exact names):
+
+Available products:
 ${products.map(p => `- ${p.product_name} (${p.price} บาท)`).join('\n')}
 
-Reply in Thai.
+Reply rules:
 - If asking price → "{price} บาท/ชิ้น"
-- If "สนใจ" → "สนใจสินค้าตัวไหนคะ? รบกวนบอกชื่อสินค้า เช่น ซีลาย # 26 เบา"
-- Otherwise → politely ask for clarification.
+- If "สนใจ" → "สนใจสินค้าตัวไหนคะ? เช่น ซีลาย # 26 เบา"
+- Keep answers short and in Thai.
 `;
 
   let reply;
   try {
-    reply = await askOpenRouter([
-      { role: 'system', content: prompt },
-      { role: 'user', content: text }
-    ]);
+    reply = await askOpenRouter([{ role: 'user', content: prompt }]);
   } catch (e) {
     reply = 'ขอโทษค่ะ ระบบชั่วคราว กรุณาลองใหม่';
   }
 
   try {
     await axios.post(
-      `https://graph.facebook.com/v19.0/me/messages`,
-      {
-        recipient: { id: userId },
-        message: { text: reply }
-      },
-      {
-        params: { access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN }
-      }
+      'https://graph.facebook.com/v19.0/me/messages',
+      { recipient: { id: userId }, message: { text: reply } },
+      { params: { access_token: process.env.FACEBOOK_PAGE_ACCESS_TOKEN } }
     );
-  } catch (_) {
+  } catch {
     /* ignore FB errors */
   }
 
   res.sendStatus(200);
 });
 
-/* ---------- Start server ---------- */
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`🚀 Bot listening on ${port}`));
