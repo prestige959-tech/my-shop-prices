@@ -1,35 +1,152 @@
 // index.js
 import express from "express";
+import { readFile } from "fs/promises";
 
 const app = express();
 app.use(express.json());
 
-// === ENV ===
-// match Railway variable names
+// ---- ENV (Railway names) ----
 const PAGE_TOKEN = (process.env.FACEBOOK_PAGE_ACCESS_TOKEN || "").trim();
 const VERIFY_TOKEN = (process.env.FACEBOOK_VERIFY_TOKEN || "").trim();
 const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || "").trim();
 const MODEL = process.env.MODEL || "openai/gpt-3.5-turbo";
 
+// ---- Small helpers ----
+const encode = encodeURIComponent;
+const mask = s => (!s ? "(empty)" : (s.replace(/\s+/g, "")).slice(0,4) + "..." + (s.replace(/\s+/g, "")).slice(-4));
+console.log("ENV → PAGE_TOKEN:", mask(PAGE_TOKEN));
 
-// Track delivery/dedup within a short window
-const seenDelivery = new Set();
-const seenExpireMs = 5 * 60 * 1000;
-setInterval(() => {
-  const now = Date.now();
-  for (const k of seenDelivery) {
-    const [id, ts] = k.split(":");
-    if (now - Number(ts) > seenExpireMs) seenDelivery.delete(k);
+function norm(s) {
+  // normalize Thai/ASCII, remove spaces and punctuation for fuzzy match
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[ \t\r\n]/g, "")
+    .replace(/[.,;:!?'\"“”‘’(){}\[\]<>|/\\\-_=+]/g, "");
+}
+function tokens(s) {
+  // keep Thai words & numbers & #numbers as tokens
+  const t = (s || "").toLowerCase();
+  const m = t.match(/[#]?\d+|[a-zA-Zก-๙]+/g);
+  return m || [];
+}
+
+// ---- CSV load & product index ----
+let PRODUCTS = [];           // [{name, price, normName, num, keywords[]}]
+let NAME_INDEX = new Map();  // normName -> product
+
+async function loadProducts() {
+  // Reads ./products.csv from repo root
+  let csv = await readFile(new URL("./products.csv", import.meta.url), "utf8");
+
+  // Simple CSV parser (handles quoted fields)
+  const rows = [];
+  let i = 0, field = "", row = [], inQuotes = false;
+  while (i < csv.length) {
+    const c = csv[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (csv[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      } else { field += c; i++; continue; }
+    } else {
+      if (c === '"') { inQuotes = true; i++; continue; }
+      if (c === ",") { row.push(field); field = ""; i++; continue; }
+      if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; i++; continue; }
+      if (c === "\r") { i++; continue; }
+      field += c; i++; continue;
+    }
   }
-}, 60_000);
+  row.push(field); rows.push(row);
 
-// Helper: send a message back to Messenger
+  // detect header
+  const header = rows[0].map(h => h.trim().toLowerCase());
+  const nameIdx =
+    header.findIndex(h => ["name","product","title","สินค้า","รายการ","product_name"].includes(h));
+  const priceIdx =
+    header.findIndex(h => ["price","ราคา","amount","cost"].includes(h));
+
+  if (nameIdx === -1 || priceIdx === -1) {
+    console.warn("CSV header not recognized. Assuming 1st col=name, 2nd col=price.");
+  }
+
+  PRODUCTS = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cols = rows[r];
+    const rawName = (cols[nameIdx !== -1 ? nameIdx : 0] || "").trim();
+    const rawPrice = (cols[priceIdx !== -1 ? priceIdx : 1] || "").trim();
+    if (!rawName) continue;
+
+    // price to number
+    const price = Number(String(rawPrice).replace(/[^\d.]/g, ""));
+    const n = norm(rawName);
+    const kw = tokens(rawName);
+    const codeMatch = rawName.match(/#\s*(\d+)/);
+    const num = codeMatch ? codeMatch[1] : null;
+
+    const item = { name: rawName, price, normName: n, num, keywords: kw };
+    PRODUCTS.push(item);
+    if (!NAME_INDEX.has(n)) NAME_INDEX.set(n, item);
+  }
+
+  console.log(`Loaded ${PRODUCTS.length} products from CSV.`);
+}
+
+function findProduct(query) {
+  const qn = norm(query);
+  const qTokens = tokens(query);
+
+  // Try exact normalized name
+  if (NAME_INDEX.has(qn)) return NAME_INDEX.get(qn);
+
+  // Extract number like # 26
+  const num = (query.match(/#\s*(\d+)/) || [])[1];
+
+  // Heuristic 1: must contain all non-trivial tokens
+  const must = qTokens.filter(t => t.length >= 2 && !/^#?\d+$/.test(t)); // words only
+  let candidates = PRODUCTS;
+
+  if (num) {
+    candidates = candidates.filter(p => p.num === num || p.name.includes(`#${num}`));
+  }
+  if (must.length) {
+    candidates = candidates.filter(p => {
+      const pn = norm(p.name);
+      return must.every(t => pn.includes(norm(t)));
+    });
+  }
+
+  // If still many, pick the one with highest token overlap
+  if (candidates.length > 1) {
+    candidates.sort((a,b) => {
+      const aScore = must.filter(t => norm(a.name).includes(norm(t))).length;
+      const bScore = must.filter(t => norm(b.name).includes(norm(t))).length;
+      if (aScore !== bScore) return bScore - aScore;
+      // Prefer exact number match
+      if (num && a.num !== b.num) return (b.num === num) - (a.num === num);
+      return a.name.length - b.name.length; // shorter usually more specific
+    });
+  }
+  return candidates[0] || null;
+}
+
+function findPriceText(userText) {
+  const p = findProduct(userText);
+  if (!p) return null;
+  if (Number.isFinite(p.price)) {
+    return `ราคา ${p.name} = ${p.price} บาท`;
+  }
+  // Price not numeric in CSV
+  return `ราคา ${p.name}: ${p.price}`;
+}
+
+// ---- Facebook send ----
 async function sendFBMessage(psid, text) {
-  const url = `https://graph.facebook.com/v16.0/me/messages?access_token=${PAGE_TOKEN}`;
+  const url = `https://graph.facebook.com/v16.0/me/messages?access_token=${encode(PAGE_TOKEN)}`;
   const body = {
     recipient: { id: psid },
     messaging_type: "RESPONSE",
-    message: { text: text?.slice(0, 2000) || "" }, // Messenger text limit
+    message: { text: text?.slice(0,2000) || "" }
   };
   const r = await fetch(url, {
     method: "POST",
@@ -42,10 +159,10 @@ async function sendFBMessage(psid, text) {
   }
 }
 
-// Helper: call OpenRouter
-async function askOpenRouter(userText, threadId) {
+// ---- OpenRouter fallback chat ----
+async function askOpenRouter(userText) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25_000); // 25s safety
+  const timeout = setTimeout(() => controller.abort(), 25_000);
   try {
     const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -63,90 +180,69 @@ async function askOpenRouter(userText, threadId) {
           {
             role: "system",
             content:
-              "You are a helpful Thai customer support assistant for a Facebook shop. " +
-              "ตอบเป็นภาษาไทยสุภาพ กระชับ ช่วยถามต่อเมื่อข้อมูลไม่พอ " +
-              "If user asks for prices or stock, ask for the product code if missing."
+              "คุณเป็นแอดมินร้าน ตอบเป็นภาษาไทย สุภาพ กระชับ " +
+              "ถ้าลูกค้าถามราคาหรือสต็อก ให้ขอ 'รหัส/ชื่อสินค้า' ถ้าไม่ครบ"
           },
           { role: "user", content: userText }
         ]
       }),
     });
-
     if (!r.ok) {
       const text = await r.text().catch(() => "");
       throw new Error(`OpenRouter ${r.status}: ${text}`);
     }
     const data = await r.json();
-
-    const content =
-      data?.choices?.[0]?.message?.content ??
-      data?.choices?.[0]?.text ??
-      null;
-
-    if (!content || typeof content !== "string") {
-      throw new Error("No content in OpenRouter response");
-    }
+    const content = data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? null;
+    if (!content) throw new Error("No content from OpenRouter");
     return content.trim();
   } finally {
     clearTimeout(timeout);
   }
 }
 
-// Webhook verification
+// ---- Webhook verify ----
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  }
+  if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
   return res.sendStatus(403);
 });
 
-// Webhook receiver
+// ---- Webhook receiver ----
 app.post("/webhook", async (req, res) => {
   try {
+    res.sendStatus(200); // ack fast
     const body = req.body;
-
-    res.sendStatus(200); // Always 200 quickly
-
     if (body.object !== "page" || !Array.isArray(body.entry)) return;
 
     for (const entry of body.entry) {
-      const messaging = entry.messaging || entry.standby || [];
-      for (const event of messaging) {
-        const psid = event?.sender?.id;
-        const mid = event?.message?.mid || event?.delivery?.mids?.[0] || "no-mid";
-        const dedupKey = `${mid}:${Date.now()}`;
+      const msgs = entry.messaging || [];
+      for (const ev of msgs) {
+        const psid = ev?.sender?.id;
+        const text = ev?.message?.text?.trim();
+        if (!psid || !text) continue;
 
-        if (!psid || !event.message || !event.message.text) continue;
+        console.log("IN:", { psid, text });
 
-        if ([...seenDelivery].some(k => k.startsWith(mid + ":"))) continue;
-        seenDelivery.add(dedupKey);
+        // 1) Try product lookup first
+        let reply = findPriceText(text);
 
-        const userText = (event.message.text || "").trim();
-        console.log("IN:", { psid, userText });
-
-        // Typing indicator
-        fetch(`https://graph.facebook.com/v16.0/me/messages?access_token=${PAGE_TOKEN}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ recipient: { id: psid }, sender_action: "typing_on" }),
-        }).catch(() => {});
-
-        let reply;
-        try {
-          reply = await askOpenRouter(userText, psid);
-        } catch (err) {
-          console.error("OpenRouter error:", err?.message);
-          reply = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองพิมพ์อีกครั้ง หรือแจ้งรหัสสินค้า/คำถามให้ละเอียดขึ้น 🙏";
+        // 2) If not found, ask OpenRouter
+        if (!reply) {
+          try {
+            reply = await askOpenRouter(text);
+          } catch (e) {
+            console.error("OpenRouter error:", e?.message);
+            reply = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง 🙏";
+          }
         }
 
+        // 3) Send reply
         try {
           await sendFBMessage(psid, reply);
-        } catch (err) {
-          console.error("FB send error:", err?.message);
+        } catch (e) {
+          console.error("FB send error:", e?.message);
         }
       }
     }
@@ -155,7 +251,11 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ---- Boot ----
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
+  await loadProducts().catch(err => {
+    console.error("Failed to load products.csv:", err?.message);
+  });
   console.log("Bot running on port", PORT);
 });
