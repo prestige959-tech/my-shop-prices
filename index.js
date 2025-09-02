@@ -180,8 +180,17 @@ async function askOpenRouter(userText) {
           {
             role: "system",
             content:
-              "คุณเป็นแอดมินร้าน ตอบเป็นภาษาไทย สุภาพ กระชับ " +
-              "ถ้าลูกค้าถามราคาหรือสต็อก ให้ขอ 'รหัส/ชื่อสินค้า' ถ้าไม่ครบ"
+                  `
+                  You are a Thai shop assistant. When customers ask about a product price,
+                  their message may contain extra words like "ราคา", "ขอ", "ครับ", "ค่ะ".
+                  Ignore those filler words. Extract the actual product name and code (e.g. "ซีลาย #26 เบา")
+                  and answer the price from this list:
+                  
+                  ซีลาย #26 เบา = 19 บาท
+                  ซีลาย #24 เบา = 23 บาท
+                  ... (etc)
+                  
+                  If you cannot find the exact product in the list, Choose the three closest answers. Or ask the user to clarify.`
           },
           { role: "user", content: userText }
         ]
