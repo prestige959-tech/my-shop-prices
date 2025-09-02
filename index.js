@@ -5,10 +5,12 @@ const app = express();
 app.use(express.json());
 
 // === ENV ===
-const PAGE_TOKEN = process.env.META_PAGE_TOKEN;           // Facebook Page access token
-const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;       // Webhook verify token
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const MODEL = process.env.MODEL || "openai/gpt-3.5-turbo"; // pick a stable model
+// match Railway variable names
+const PAGE_TOKEN = (process.env.FACEBOOK_PAGE_ACCESS_TOKEN || "").trim();
+const VERIFY_TOKEN = (process.env.FACEBOOK_VERIFY_TOKEN || "").trim();
+const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || "").trim();
+const MODEL = process.env.MODEL || "openai/gpt-3.5-turbo";
+
 
 // Track delivery/dedup within a short window
 const seenDelivery = new Set();
