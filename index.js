@@ -1,6 +1,5 @@
 // index.js
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
@@ -52,7 +51,6 @@ async function askOpenRouter(userText, threadId) {
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        // Helpful headers (optional but nice)
         "HTTP-Referer": "https://github.com/prestige959-tech/my-shop-prices",
         "X-Title": "my-shop-prices fb-bot"
       },
@@ -78,7 +76,6 @@ async function askOpenRouter(userText, threadId) {
     }
     const data = await r.json();
 
-    // Some SDKs return choices[0].message.content
     const content =
       data?.choices?.[0]?.message?.content ??
       data?.choices?.[0]?.text ??
@@ -110,8 +107,7 @@ app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
 
-    // Immediately 200 to avoid FB retries due to timeout
-    res.sendStatus(200);
+    res.sendStatus(200); // Always 200 quickly
 
     if (body.object !== "page" || !Array.isArray(body.entry)) return;
 
@@ -122,17 +118,15 @@ app.post("/webhook", async (req, res) => {
         const mid = event?.message?.mid || event?.delivery?.mids?.[0] || "no-mid";
         const dedupKey = `${mid}:${Date.now()}`;
 
-        // Skip echoes & non-text messages
         if (!psid || !event.message || !event.message.text) continue;
 
-        // Basic dedupe: if we've seen this mid recently, skip
         if ([...seenDelivery].some(k => k.startsWith(mid + ":"))) continue;
         seenDelivery.add(dedupKey);
 
         const userText = (event.message.text || "").trim();
         console.log("IN:", { psid, userText });
 
-        // Optional typing indicator (best-effort)
+        // Typing indicator
         fetch(`https://graph.facebook.com/v16.0/me/messages?access_token=${PAGE_TOKEN}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -143,7 +137,6 @@ app.post("/webhook", async (req, res) => {
         try {
           reply = await askOpenRouter(userText, psid);
         } catch (err) {
-          // Log detailed error but send a friendly message once
           console.error("OpenRouter error:", err?.message);
           reply = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองพิมพ์อีกครั้ง หรือแจ้งรหัสสินค้า/คำถามให้ละเอียดขึ้น 🙏";
         }
@@ -157,7 +150,6 @@ app.post("/webhook", async (req, res) => {
     }
   } catch (e) {
     console.error("Webhook handler error:", e?.message);
-    // (We already sent 200)
   }
 });
 
