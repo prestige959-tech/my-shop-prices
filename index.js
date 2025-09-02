@@ -28,7 +28,7 @@ async function askOpenRouter(messages) {
         'HTTP-Referer': 'https://railway.app',
         'X-Title': 'Facebook Price Bot'
       },
-      timeout: 4000
+      timeout: 8000
     }
   );
   return res.data.choices[0].message.content.trim();
