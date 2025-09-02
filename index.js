@@ -6,35 +6,39 @@ import csv from 'csvtojson';
 const app = express();
 app.use(express.json());
 
-const PRODUCTS_URL = 'https://raw.githubusercontent.com/<YOUR_USERNAME>/my-shop-prices/main/products.csv';
+const PRODUCTS_URL = `https://raw.githubusercontent.com/${process.env.GITHUB_USERNAME}/my-shop-prices/main/products.csv`;
 
 async function loadProducts() {
   const { data } = await axios.get(PRODUCTS_URL);
   return await csv().fromString(data);
 }
 
-async function askKimi(messages) {
-  const res = await axios.post('https://api.moonshot.cn/v1/chat/completions', {
-    model: 'kimi-latest',
+async function askOpenRouter(messages) {
+  const res = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+    model: 'moonshot/kimi-latest',
     messages,
     temperature: 0.3
   }, {
-    headers: { Authorization: `Bearer ${process.env.KIMI_API_KEY}` }
+    headers: {
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      'HTTP-Referer': 'https://railway.app',
+      'X-Title': 'Facebook Price Bot'
+    }
   });
   return res.data.choices[0].message.content;
 }
 
+// FB webhook verification
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === process.env.FACEBOOK_VERIFY_TOKEN) {
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
+  return (mode === 'subscribe' && token === process.env.FACEBOOK_VERIFY_TOKEN)
+    ? res.status(200).send(challenge)
+    : res.sendStatus(403);
 });
 
+// Handle incoming messages
 app.post('/webhook', async (req, res) => {
   const entry = req.body.entry?.[0];
   if (!entry) return res.sendStatus(200);
@@ -45,23 +49,19 @@ app.post('/webhook', async (req, res) => {
   const text = messaging.message.text.trim();
 
   const products = await loadProducts();
-  const productMap = new Map(products.map(p => [p.product_name, p.price]));
-
   const prompt = `
 You are a Thai sales assistant.
-The user just sent: "${text}"
-Available product names:
-${products.map(p => `- ${p.product_name}`).join('\n')}
+User: "${text}"
+Available products (exact names):
+${products.map(p => `- ${p.product_name} (${p.price} บาท)`).join('\n')}
 
 Reply in Thai.
-If the user asks for price, respond with:
-"{price} บาท/ชิ้น"
-If the user says something like "สนใจ", respond as a friendly seller:
-"สนใจสินค้าตัวไหนคะ? รบกวนบอกชื่อสินค้า เช่น ซีลาย # 26 เบา"
-If unclear, kindly ask for clarification.
+- If asking price → "{price} บาท/ชิ้น"
+- If "สนใจ" → "สนใจสินค้าตัวไหนคะ? รบกวนบอกชื่อสินค้า เช่น ซีลาย # 26 เบา"
+- Otherwise → politely ask for clarification.
 `;
 
-  const reply = await askKimi([
+  const reply = await askOpenRouter([
     { role: 'system', content: prompt },
     { role: 'user', content: text }
   ]);
@@ -77,4 +77,4 @@ If unclear, kindly ask for clarification.
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server listening on ${port}`));
+app.listen(port, () => console.log(`🚀 Bot listening on ${port}`));
