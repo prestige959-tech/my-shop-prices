@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 const LINE_CHANNEL_SECRET = (process.env.LINE_CHANNEL_SECRET || "").trim();
 const LINE_ACCESS_TOKEN  = (process.env.LINE_ACCESS_TOKEN  || "").trim();
 const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || "").trim();
-const MODEL = process.env.MODEL || "moonshotai/kimi-k2:free";
+const MODEL = process.env.MODEL || "moonshotai/kimi-k2";
 
 // ── Basic logger ──────────────────────────────────────────────────────────────
 const mask = (s) =>
