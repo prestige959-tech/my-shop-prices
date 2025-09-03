@@ -1,23 +1,24 @@
-// index.js
+// index.js — LINE Official Account bot with Redis memory + OpenRouter
 import express from "express";
 import crypto from "crypto";
-import { readFile } from "fs/promises";
-import { getContext, setContext } from "./chatMemory.js";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { getHistory, saveHistory } from "./chatMemory.js"; // ✅ match your exports
 
-// ─── App ───────────────────────────────────────────────────────────────────────
-const app = express(); // we'll attach raw parser only on /webhook
-
-// ─── ENV ───────────────────────────────────────────────────────────────────────
+// ── ENV ───────────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
 const LINE_CHANNEL_SECRET = (process.env.LINE_CHANNEL_SECRET || "").trim();
 const LINE_ACCESS_TOKEN  = (process.env.LINE_ACCESS_TOKEN  || "").trim();
 const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || "").trim();
 const MODEL = process.env.MODEL || "moonshotai/kimi-k2:free";
 
-// small logger helpers (kept from original style)
-const mask = s => (!s ? "(empty)" : s.replace(/\s+/g, "").slice(0, 4) + "..." + s.replace(/\s+/g, "").slice(-4));
+// ── Basic logger ──────────────────────────────────────────────────────────────
+const mask = (s) =>
+  !s ? "(empty)" : s.replace(/\s+/g, "").slice(0, 4) + "..." + s.replace(/\s+/g, "").slice(-4);
 console.log("ENV → LINE_ACCESS_TOKEN:", mask(LINE_ACCESS_TOKEN));
 
-// ─── Text utils (from your original) ───────────────────────────────────────────
+// ── Text utils (lightweight) ─────────────────────────────────────────────────
 function norm(s) {
   return (s || "")
     .toLowerCase()
@@ -31,12 +32,22 @@ function tokens(s) {
   return m || [];
 }
 
-// ─── CSV load & product index (from your original) ────────────────────────────
+// ── Load products.csv (optional but kept from your original) ──────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PRODUCTS_CSV = path.join(__dirname, "products.csv");
+
 let PRODUCTS = [];
 let NAME_INDEX = new Map();
 
-async function loadProducts() {
-  let csv = await readFile(new URL("./products.csv", import.meta.url), "utf8");
+function loadProductsSync() {
+  if (!fs.existsSync(PRODUCTS_CSV)) {
+    console.log("products.csv not found; continuing without product data");
+    return;
+  }
+  const csv = fs.readFileSync(PRODUCTS_CSV, "utf8");
+
+  // Tiny CSV splitter that supports quotes
   const rows = [];
   let i = 0, field = "", row = [], inQuotes = false;
   while (i < csv.length) {
@@ -56,9 +67,9 @@ async function loadProducts() {
   }
   row.push(field); rows.push(row);
 
-  const header = rows[0].map(h => h.trim().toLowerCase());
-  const nameIdx  = header.findIndex(h => ["name","product","title","สินค้า","รายการ","product_name"].includes(h));
-  const priceIdx = header.findIndex(h => ["price","ราคา","amount","cost"].includes(h));
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const nameIdx  = header.findIndex((h) => ["name","product","title","สินค้า","รายการ","product_name"].includes(h));
+  const priceIdx = header.findIndex((h) => ["price","ราคา","amount","cost"].includes(h));
 
   PRODUCTS = [];
   NAME_INDEX = new Map();
@@ -68,116 +79,87 @@ async function loadProducts() {
     const rawPrice = (cols[priceIdx !== -1 ? priceIdx : 1] || "").trim();
     if (!rawName) continue;
     const price = Number(String(rawPrice).replace(/[^\d.]/g, ""));
-    const n = norm(rawName);
-    const kw = tokens(rawName);
     const codeMatch = rawName.match(/#\s*(\d+)/);
     const num = codeMatch ? codeMatch[1] : null;
 
-    const item = { name: rawName, price, normName: n, num, keywords: kw };
+    const item = { name: rawName, price, normName: norm(rawName), num, keywords: tokens(rawName) };
     PRODUCTS.push(item);
-    if (!NAME_INDEX.has(n)) NAME_INDEX.set(n, item);
+    if (!NAME_INDEX.has(item.normName)) NAME_INDEX.set(item.normName, item);
   }
-  console.log(`Loaded ${PRODUCTS.length} products from CSV.`);
+  console.log(`Loaded ${PRODUCTS.length} products from CSV`);
 }
+loadProductsSync();
 
-// (Optional) fuzzy finder kept for future use (same logic as your file)
 function findProduct(query) {
   const qn = norm(query);
-  const qTokens = tokens(query);
   if (NAME_INDEX.has(qn)) return NAME_INDEX.get(qn);
 
+  const qTokens = tokens(query).filter((t) => t.length >= 2 && !/^#?\d+$/.test(t));
   const num = (query.match(/#\s*(\d+)/) || [])[1];
-  const must = qTokens.filter(t => t.length >= 2 && !/^#?\d+$/.test(t));
   let candidates = PRODUCTS;
 
-  if (num) {
-    candidates = candidates.filter(p => p.num === num || p.name.includes(`#${num}`));
+  if (num) candidates = candidates.filter((p) => p.num === num || p.name.includes(`#${num}`));
+  if (qTokens.length) {
+    candidates = candidates.filter((p) => qTokens.every((t) => p.normName.includes(norm(t))));
   }
-  if (must.length) {
-    candidates = candidates.filter(p => must.every(t => norm(p.name).includes(norm(t))));
-  }
-  if (candidates.length > 1) {
-    candidates.sort((a, b) => {
-      const aScore = must.filter(t => norm(a.name).includes(norm(t))).length;
-      const bScore = must.filter(t => norm(b.name).includes(norm(t))).length;
-      if (aScore !== bScore) return bScore - aScore;
-      if (num && a.num !== b.num) return (b.num === num) - (a.num === num);
-      return a.name.length - b.name.length;
-    });
-  }
-  return candidates[0] || null;
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a.name.length - b.name.length);
+  return candidates[0];
 }
 
-// ─── LLM call (same prompt structure as original) ─────────────────────────────
-async function askOpenRouter(userText, history = []) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25_000);
-
+// ── LLM (OpenRouter) ─────────────────────────────────────────────────────────
+async function callModel(history, userText) {
   const productList = PRODUCTS
-    .map(p => `${p.name} = ${Number.isFinite(p.price) ? p.price + " บาท" : p.price}`)
+    .map((p) => `${p.name} = ${Number.isFinite(p.price) ? p.price + " บาท" : p.price}`)
     .join("\n");
 
-  try {
-    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        "HTTP-Referer": "https://github.com/prestige959-tech/my-shop-prices",
-        "X-Title": "my-shop-prices line-bot"
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        temperature: 0.7,
-        messages: [
-          {
-            role: "system",
-            content: `You are a friendly Thai shop assistant chatbot. You help customers with product inquiries in a natural, conversational way.
+  const messages = [
+    {
+      role: "system",
+      content: `You are a friendly Thai shop assistant chatbot. You help customers with product inquiries.
 
 PRODUCT CATALOG:
 ${productList}
 
 INSTRUCTIONS:
-- Answer in Thai language naturally and conversationally
+- Answer in Thai, naturally and concisely
 - When customers ask about prices, provide the exact price from the catalog above
-- Bold the product name and price.
-- If a product isn't found, suggest similar products or ask for clarification
-- Be helpful, polite, and use appropriate Thai politeness particles (ค่ะ, นะ, etc.)
-- Handle variations in product names, codes, and customer questions flexibly
-- If customers ask general questions not related to products, respond helpfully as a shop assistant would
-- Keep responses concise but friendly
-- If customers ask for delivery such as "ส่งไหม" or มีบริการส่งไหม, answer 
+- **Bold** the product name and price
+- If a product isn't found, suggest similar items or ask for clarification
+- If asked about delivery ("ส่งไหม", etc.), reply:
   "บริษัทเรามีบริการจัดส่งโดยใช้ Lalamove ในพื้นที่กรุงเทพฯ และปริมณฑลค่ะ
   ทางร้านจะเป็นผู้เรียกรถให้ ส่วน ค่าขนส่งลูกค้าชำระเองนะคะ
   เรื่อง ยกสินค้าลง ทางร้านไม่มีทีมบริการให้ค่ะ ลูกค้าต้อง จัดหาคนช่วยยกลงเอง นะคะ"`
-          },
-          ...history,
-          { role: "user", content: userText }
-        ]
-      })
-    });
+    },
+    ...history,
+    { role: "user", content: userText }
+  ];
 
-    if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      throw new Error(`OpenRouter ${r.status}: ${text}`);
-    }
-    const data = await r.json();
-    const content = data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? null;
-    if (!content) throw new Error("No content from OpenRouter");
-    return content.trim();
-  } finally {
-    clearTimeout(timeout);
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "HTTP-Referer": "https://example.com",
+      "X-Title": "my-shop-prices line-bot"
+    },
+    body: JSON.stringify({ model: MODEL, messages, temperature: 0.4 })
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`OpenRouter error ${res.status}: ${text}`);
   }
+  const json = await res.json();
+  return json?.choices?.[0]?.message?.content?.trim() || "ขอโทษค่ะ ตอนนี้ระบบมีปัญหา ลองใหม่อีกครั้งนะคะ";
 }
 
-// ─── LINE helpers ─────────────────────────────────────────────────────────────
+// ── LINE helpers ──────────────────────────────────────────────────────────────
 function isValidLineSignature(bodyBuffer, signature) {
   if (!LINE_CHANNEL_SECRET || !signature) return false;
   const hmac = crypto.createHmac("SHA256", LINE_CHANNEL_SECRET);
   hmac.update(bodyBuffer);
   const digest = hmac.digest("base64");
-  // timing-safe compare
   try {
     return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature));
   } catch {
@@ -203,72 +185,67 @@ async function lineReply(replyToken, text) {
   }
 }
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
-// Health
+// ── App + Routes ──────────────────────────────────────────────────────────────
+const app = express();
+
+// Health check
 app.get("/", (_req, res) => res.send("LINE bot up"));
 
-// Use raw body ONLY for LINE signature route
-app.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    const signature = req.get("x-line-signature");
-    if (!isValidLineSignature(req.body, signature)) {
-      console.warn("Invalid LINE signature");
-      return res.status(403).send("invalid signature");
-    }
+// webhook must use raw body for signature verification
+app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const signature = req.get("x-line-signature");
+  if (!isValidLineSignature(req.body, signature)) {
+    console.warn("Invalid LINE signature");
+    return res.status(403).send("invalid signature");
+  }
 
-    // Ack first — LINE requires 200 quickly
-    res.status(200).end();
+  res.status(200).end(); // ACK quickly
 
-    // Process events asynchronously
-    let data = {};
-    try { data = JSON.parse(req.body.toString("utf8")); } catch { data = {}; }
-    const events = Array.isArray(data.events) ? data.events : [];
+  let payload = {};
+  try { payload = JSON.parse(req.body.toString("utf8")); } catch {}
+  const events = Array.isArray(payload.events) ? payload.events : [];
 
-    for (const event of events) {
-      try {
-        if (event.type !== "message" || event.message?.type !== "text") continue;
+  for (const event of events) {
+    try {
+      if (event.type !== "message" || event.message?.type !== "text") continue;
 
-        const userId = event.source?.userId || "unknown";
-        const replyToken = event.replyToken;
-        const userText = (event.message?.text || "").trim();
+      const userId = event.source?.userId || "unknown";
+      const replyToken = event.replyToken;
+      const userText = (event.message?.text || "").trim();
 
-        console.log("IN:", { userId, userText });
+      // 1) Load memory
+      const history = await getHistory(userId);
 
-        // Load memory
-        const history = await getContext(userId); // per-user memory key (same as original FB psid)  :contentReference[oaicite:2]{index=2}
-
-        // Ask model (same prompt/catalog flow as original)  :contentReference[oaicite:3]{index=3}
-        let answer;
-        try {
-          answer = await askOpenRouter(userText, history);
-        } catch (e) {
-          console.error("OpenRouter error:", e?.message);
-          answer = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง 🙏";
-        }
-
-        // Reply to LINE
-        await lineReply(replyToken, answer);
-
-        // Save conversation memory (keep last 10 turns, TTL is in chatMemory.js)
-        history.push({ role: "user", content: userText });
-        history.push({ role: "assistant", content: answer });
-        await setContext(userId, history); // trims & TTL  :contentReference[oaicite:4]{index=4}
-      } catch (err) {
-        console.error("Event handling error:", err);
+      // 2) Quick direct price answer if a product name is detected
+      const p = findProduct(userText);
+      if (p) {
+        const reply = `ราคา **${p.name}** **${p.price} บาท**`;
+        await lineReply(replyToken, reply);
+        const updated = [...history, { role: "user", content: userText }, { role: "assistant", content: reply }];
+        await saveHistory(userId, updated);
+        continue;
       }
+
+      // 3) Ask LLM with memory
+      let answer;
+      try {
+        answer = await callModel(history, userText);
+      } catch (e) {
+        console.error("LLM error:", e);
+        answer = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง 🙏";
+      }
+
+      // 4) Reply + persist memory
+      await lineReply(replyToken, answer);
+      const updated = [...history, { role: "user", content: userText }, { role: "assistant", content: answer }];
+      await saveHistory(userId, updated);
+    } catch (err) {
+      console.error("Event handling error:", err);
     }
   }
-);
+});
 
-// ─── Boot ─────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  try {
-    await loadProducts(); // same loader as original
-  } catch (err) {
-    console.error("Failed to load products.csv:", err?.message);
-  }
-  console.log("Bot running on port", PORT);
+// ── Start ─────────────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`Bot running on :${PORT}`);
 });
