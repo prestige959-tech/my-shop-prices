@@ -1,41 +1,24 @@
-// index.js – supports both Facebook Messenger and LINE
+// index.js
 import express from "express";
 import { readFile } from "fs/promises";
-import { middleware as fbMiddleware } from "@line/bot-sdk";   // only for LINE middleware
-import { Client as LineClient } from "@line/bot-sdk";          // LINE SDK
 
 const app = express();
 app.use(express.json());
 
-// ----------------------------------------------------------
-// ENVIRONMENT
-// ----------------------------------------------------------
-const PAGE_TOKEN          = (process.env.FACEBOOK_PAGE_ACCESS_TOKEN || "").trim();
-const VERIFY_TOKEN        = (process.env.FACEBOOK_VERIFY_TOKEN       || "").trim();
-const OPENROUTER_API_KEY  = (process.env.OPENROUTER_API_KEY          || "").trim();
-const MODEL               = process.env.MODEL || "moonshotai/kimi-k2";
+// ---- ENV (Railway names) ----
+const PAGE_TOKEN = (process.env.FACEBOOK_PAGE_ACCESS_TOKEN || "").trim();
+const VERIFY_TOKEN = (process.env.FACEBOOK_VERIFY_TOKEN || "").trim();
+const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || "").trim();
+const MODEL = process.env.MODEL || "moonshotai/kimi-k2";
 
-// LINE
-const LINE_CHANNEL_ACCESS_TOKEN = (process.env.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
-const LINE_CHANNEL_SECRET       = (process.env.LINE_CHANNEL_SECRET       || "").trim();
 
-// ----------------------------------------------------------
-// LINE client
-// ----------------------------------------------------------
-const lineClient = new LineClient({
-  channelAccessToken: LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret:      LINE_CHANNEL_SECRET,
-});
-
-// ----------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------
+// ---- Small helpers ----
 const encode = encodeURIComponent;
 const mask = s => (!s ? "(empty)" : (s.replace(/\s+/g, "")).slice(0,4) + "..." + (s.replace(/\s+/g, "")).slice(-4));
 console.log("ENV → PAGE_TOKEN:", mask(PAGE_TOKEN));
-console.log("ENV → LINE_CHANNEL_ACCESS_TOKEN:", mask(LINE_CHANNEL_ACCESS_TOKEN));
 
 function norm(s) {
+  // normalize Thai/ASCII, remove spaces and punctuation for fuzzy match
   return (s || "")
     .toLowerCase()
     .normalize("NFKC")
@@ -43,19 +26,21 @@ function norm(s) {
     .replace(/[.,;:!?'\"“”‘’(){}\[\]<>|/\\\-_=+]/g, "");
 }
 function tokens(s) {
+  // keep Thai words & numbers & #numbers as tokens
   const t = (s || "").toLowerCase();
   const m = t.match(/[#]?\d+|[a-zA-Zก-๙]+/g);
   return m || [];
 }
 
-// ----------------------------------------------------------
-// Product loading
-// ----------------------------------------------------------
-let PRODUCTS = [];
-let NAME_INDEX = new Map();
+// ---- CSV load & product index ----
+let PRODUCTS = [];           // [{name, price, normName, num, keywords[]}]
+let NAME_INDEX = new Map();  // normName -> product
 
 async function loadProducts() {
+  // Reads ./products.csv from repo root
   let csv = await readFile(new URL("./products.csv", import.meta.url), "utf8");
+
+  // Simple CSV parser (handles quoted fields)
   const rows = [];
   let i = 0, field = "", row = [], inQuotes = false;
   while (i < csv.length) {
@@ -75,9 +60,16 @@ async function loadProducts() {
   }
   row.push(field); rows.push(row);
 
+  // detect header
   const header = rows[0].map(h => h.trim().toLowerCase());
-  const nameIdx = header.findIndex(h => ["name","product","title","สินค้า","รายการ","product_name"].includes(h));
-  const priceIdx = header.findIndex(h => ["price","ราคา","amount","cost"].includes(h));
+  const nameIdx =
+    header.findIndex(h => ["name","product","title","สินค้า","รายการ","product_name"].includes(h));
+  const priceIdx =
+    header.findIndex(h => ["price","ราคา","amount","cost"].includes(h));
+
+  if (nameIdx === -1 || priceIdx === -1) {
+    console.warn("CSV header not recognized. Assuming 1st col=name, 2nd col=price.");
+  }
 
   PRODUCTS = [];
   for (let r = 1; r < rows.length; r++) {
@@ -85,25 +77,34 @@ async function loadProducts() {
     const rawName = (cols[nameIdx !== -1 ? nameIdx : 0] || "").trim();
     const rawPrice = (cols[priceIdx !== -1 ? priceIdx : 1] || "").trim();
     if (!rawName) continue;
+
+    // price to number
     const price = Number(String(rawPrice).replace(/[^\d.]/g, ""));
     const n = norm(rawName);
     const kw = tokens(rawName);
     const codeMatch = rawName.match(/#\s*(\d+)/);
     const num = codeMatch ? codeMatch[1] : null;
+
     const item = { name: rawName, price, normName: n, num, keywords: kw };
     PRODUCTS.push(item);
     if (!NAME_INDEX.has(n)) NAME_INDEX.set(n, item);
   }
+
   console.log(`Loaded ${PRODUCTS.length} products from CSV.`);
 }
 
 function findProduct(query) {
   const qn = norm(query);
   const qTokens = tokens(query);
+
+  // Try exact normalized name
   if (NAME_INDEX.has(qn)) return NAME_INDEX.get(qn);
 
+  // Extract number like # 26
   const num = (query.match(/#\s*(\d+)/) || [])[1];
-  const must = qTokens.filter(t => t.length >= 2 && !/^#?\d+$/.test(t));
+
+  // Heuristic 1: must contain all non-trivial tokens
+  const must = qTokens.filter(t => t.length >= 2 && !/^#?\d+$/.test(t)); // words only
   let candidates = PRODUCTS;
 
   if (num) {
@@ -115,21 +116,23 @@ function findProduct(query) {
       return must.every(t => pn.includes(norm(t)));
     });
   }
+
+  // If still many, pick the one with highest token overlap
   if (candidates.length > 1) {
     candidates.sort((a,b) => {
       const aScore = must.filter(t => norm(a.name).includes(norm(t))).length;
       const bScore = must.filter(t => norm(b.name).includes(norm(t))).length;
       if (aScore !== bScore) return bScore - aScore;
+      // Prefer exact number match
       if (num && a.num !== b.num) return (b.num === num) - (a.num === num);
-      return a.name.length - b.name.length;
+      return a.name.length - b.name.length; // shorter usually more specific
     });
   }
   return candidates[0] || null;
 }
 
-// ----------------------------------------------------------
-// Facebook send
-// ----------------------------------------------------------
+
+// ---- Facebook send ----
 async function sendFBMessage(psid, text) {
   const url = `https://graph.facebook.com/v16.0/me/messages?access_token=${encode(PAGE_TOKEN)}`;
   const body = {
@@ -148,28 +151,16 @@ async function sendFBMessage(psid, text) {
   }
 }
 
-// ----------------------------------------------------------
-// LINE send (reply)
-// ----------------------------------------------------------
-async function sendLineMessage(replyToken, text) {
-  try {
-    await lineClient.replyMessage(replyToken, { type: "text", text: text?.slice(0,2000) || "" });
-  } catch (e) {
-    console.error("LINE send error:", e?.message);
-  }
-}
-
-// ----------------------------------------------------------
-// OpenRouter chat with product knowledge
-// ----------------------------------------------------------
+// ---- OpenRouter chat with product knowledge ----
 async function askOpenRouter(userText) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25_000);
-
-  const productList = PRODUCTS.map(p =>
+  
+  // Build product list for context
+  const productList = PRODUCTS.map(p => 
     `${p.name} = ${Number.isFinite(p.price) ? p.price + ' บาท' : p.price}`
   ).join('\n');
-
+  
   try {
     const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -178,7 +169,7 @@ async function askOpenRouter(userText) {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
         "HTTP-Referer": "https://github.com/prestige959-tech/my-shop-prices",
-        "X-Title": "my-shop-prices bot"
+        "X-Title": "my-shop-prices fb-bot"
       },
       body: JSON.stringify({
         model: MODEL,
@@ -203,7 +194,9 @@ INSTRUCTIONS:
 - If customers ask for delivery such as "ส่งไหม" or มีบริการส่งไหม, answer 
   "บริษัทเรามีบริการจัดส่งโดยใช้ Lalamove ในพื้นที่กรุงเทพฯ และปริมณฑลค่ะ
   ทางร้านจะเป็นผู้เรียกรถให้ ส่วน ค่าขนส่งลูกค้าชำระเองนะคะ
-  เรื่อง ยกสินค้าลง ทางร้านไม่มีทีมบริการให้ค่ะ ลูกค้าต้อง จัดหาคนช่วยยกลงเอง นะคะ"`
+  เรื่อง ยกสินค้าลง ทางร้านไม่มีทีมบริการให้ค่ะ ลูกค้าต้อง จัดหาคนช่วยยกลงเอง นะคะ"
+
+Remember: You have access to the complete product catalog above. Use it to provide accurate pricing and product information.`
           },
           { role: "user", content: userText }
         ]
@@ -222,9 +215,7 @@ INSTRUCTIONS:
   }
 }
 
-// ----------------------------------------------------------
-// Facebook webhook verify
-// ----------------------------------------------------------
+// ---- Webhook verify ----
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -233,9 +224,7 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// ----------------------------------------------------------
-// Facebook webhook receiver
-// ----------------------------------------------------------
+// ---- Webhook receiver ----
 app.post("/webhook", async (req, res) => {
   try {
     res.sendStatus(200); // ack fast
@@ -249,8 +238,9 @@ app.post("/webhook", async (req, res) => {
         const text = ev?.message?.text?.trim();
         if (!psid || !text) continue;
 
-        console.log("FB IN:", { psid, text });
+        console.log("IN:", { psid, text });
 
+        // Always use OpenRouter with full product catalog as knowledge base
         let reply;
         try {
           reply = await askOpenRouter(text);
@@ -259,6 +249,7 @@ app.post("/webhook", async (req, res) => {
           reply = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง 🙏";
         }
 
+        // 3) Send reply
         try {
           await sendFBMessage(psid, reply);
         } catch (e) {
@@ -271,37 +262,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ----------------------------------------------------------
-// LINE webhook receiver
-// ----------------------------------------------------------
-app.post("/webhook/line", middleware({ channelSecret: LINE_CHANNEL_SECRET }), async (req, res) => {
-  res.sendStatus(200); // ack fast
-  const events = req.body.events || [];
-  for (const event of events) {
-    if (event.type === "message" && event.message.type === "text") {
-      const userText = event.message.text.trim();
-      console.log("LINE IN:", { userId: event.source.userId, text: userText });
-
-      let reply;
-      try {
-        reply = await askOpenRouter(userText);
-      } catch (e) {
-        console.error("OpenRouter error:", e?.message);
-        reply = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง 🙏";
-      }
-
-      try {
-        await sendLineMessage(event.replyToken, reply);
-      } catch (e) {
-        console.error("LINE send error:", e?.message);
-      }
-    }
-  }
-});
-
-// ----------------------------------------------------------
-// Boot
-// ----------------------------------------------------------
+// ---- Boot ----
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   await loadProducts().catch(err => {
