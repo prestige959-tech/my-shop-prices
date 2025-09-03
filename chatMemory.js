@@ -1,17 +1,19 @@
-import { createClient } from 'redis';
+// chatMemory.js
+import { createClient } from "redis";
 
-const client = createClient({ url: process.env.REDIS_URL });
-client.on('error', err => console.error('Redis error:', err));
-await client.connect();          // runs once at boot
+const REDIS_URL = process.env.REDIS_URL;
+const CHAT_TTL_SECONDS = Number(process.env.CHAT_TTL_SECONDS || 86400); // 24h
+const HISTORY_TURNS = Number(process.env.HISTORY_TURNS || 10);
 
-const TTL = Number(process.env.CHAT_TTL_SECONDS || 86400);
+export const redis = createClient({ url: REDIS_URL });
+redis.on("error", (err) => console.error("Redis error:", err));
 
-export async function getContext(psid) {
-  const raw = await client.get(`chat:${psid}`);
+export async function getHistory(userId) {
+  const raw = await redis.get(`chat:${userId}`);
   return raw ? JSON.parse(raw) : [];
 }
 
-export async function setContext(psid, messages) {
-  const trimmed = messages.slice(-10);          // keep last 10 turns
-  await client.setEx(`chat:${psid}`, TTL, JSON.stringify(trimmed));
+export async function saveHistory(userId, history) {
+  const keep = history.slice(-HISTORY_TURNS);
+  await redis.setEx(`chat:${userId}`, CHAT_TTL_SECONDS, JSON.stringify(keep));
 }
