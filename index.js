@@ -9,7 +9,8 @@ app.use(express.json());
 const PAGE_TOKEN = (process.env.FACEBOOK_PAGE_ACCESS_TOKEN || "").trim();
 const VERIFY_TOKEN = (process.env.FACEBOOK_VERIFY_TOKEN || "").trim();
 const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || "").trim();
-const MODEL = process.env.MODEL || "openai/gpt-3.5-turbo";
+const MODEL = process.env.MODEL || "moonshotai/kimi-k2";
+
 
 // ---- Small helpers ----
 const encode = encodeURIComponent;
