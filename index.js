@@ -130,15 +130,6 @@ function findProduct(query) {
   return candidates[0] || null;
 }
 
-function findPriceText(userText) {
-  const p = findProduct(userText);
-  if (!p) return null;
-  if (Number.isFinite(p.price)) {
-    return `ราคา ${p.name} = ${p.price} บาท`;
-  }
-  // Price not numeric in CSV
-  return `ราคา ${p.name}: ${p.price}`;
-}
 
 // ---- Facebook send ----
 async function sendFBMessage(psid, text) {
@@ -159,10 +150,16 @@ async function sendFBMessage(psid, text) {
   }
 }
 
-// ---- OpenRouter fallback chat ----
+// ---- OpenRouter chat with product knowledge ----
 async function askOpenRouter(userText) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25_000);
+  
+  // Build product list for context
+  const productList = PRODUCTS.map(p => 
+    `${p.name} = ${Number.isFinite(p.price) ? p.price + ' บาท' : p.price}`
+  ).join('\n');
+  
   try {
     const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -175,22 +172,25 @@ async function askOpenRouter(userText) {
       },
       body: JSON.stringify({
         model: MODEL,
-        temperature: 0.4,
+        temperature: 0.7,
         messages: [
           {
             role: "system",
-            content:
-                  `
-                  You are a Thai shop assistant. When customers ask about a product price,
-                  their message may contain extra words like "ราคา", "ขอ", "ครับ", "ค่ะ".
-                  Ignore those filler words. Extract the actual product name and code (e.g. "ซีลาย #26 เบา")
-                  and answer the price from this list:
-                  
-                  ซีลาย #26 เบา = 19 บาท
-                  ซีลาย #24 เบา = 23 บาท
-                  ... (etc)
-                  
-                  If you cannot find the exact product in the list, Choose the three closest answers. Or ask the user to clarify.`
+            content: `You are a friendly Thai shop assistant chatbot. You help customers with product inquiries in a natural, conversational way.
+
+PRODUCT CATALOG:
+${productList}
+
+INSTRUCTIONS:
+- Answer in Thai language naturally and conversationally
+- When customers ask about prices, provide the exact price from the catalog above
+- If a product isn't found, suggest similar products or ask for clarification
+- Be helpful, polite, and use appropriate Thai politeness particles (ครับ/ค่ะ, นะ, etc.)
+- Handle variations in product names, codes, and customer questions flexibly
+- If customers ask general questions not related to products, respond helpfully as a shop assistant would
+- Keep responses concise but friendly
+
+Remember: You have access to the complete product catalog above. Use it to provide accurate pricing and product information.`
           },
           { role: "user", content: userText }
         ]
@@ -234,17 +234,13 @@ app.post("/webhook", async (req, res) => {
 
         console.log("IN:", { psid, text });
 
-        // 1) Try product lookup first
-        let reply = findPriceText(text);
-
-        // 2) If not found, ask OpenRouter
-        if (!reply) {
-          try {
-            reply = await askOpenRouter(text);
-          } catch (e) {
-            console.error("OpenRouter error:", e?.message);
-            reply = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง 🙏";
-          }
+        // Always use OpenRouter with full product catalog as knowledge base
+        let reply;
+        try {
+          reply = await askOpenRouter(text);
+        } catch (e) {
+          console.error("OpenRouter error:", e?.message);
+          reply = "ขอโทษค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง 🙏";
         }
 
         // 3) Send reply
