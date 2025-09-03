@@ -11,7 +11,7 @@ const app = express(); // we'll attach raw parser only on /webhook
 const LINE_CHANNEL_SECRET = (process.env.LINE_CHANNEL_SECRET || "").trim();
 const LINE_ACCESS_TOKEN  = (process.env.LINE_ACCESS_TOKEN  || "").trim();
 const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || "").trim();
-const MODEL = process.env.MODEL || "moonshotai/kimi-k2";
+const MODEL = process.env.MODEL || "moonshotai/kimi-k2:free";
 
 // small logger helpers (kept from original style)
 const mask = s => (!s ? "(empty)" : s.replace(/\s+/g, "").slice(0, 4) + "..." + s.replace(/\s+/g, "").slice(-4));
