@@ -1,15 +1,10 @@
 {
   "name": "my-shop-prices",
-  "version": "1.1.0",
-  "description": "LINE chatbot with OpenRouter + Redis conversation memory",
+  "version": "1.0.0",
+  "description": "LINE + Facebook bot connected to OpenRouter",
   "main": "index.js",
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "express": "^4.18.2",
     "redis": "^4.6.14"
