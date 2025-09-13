@@ -5,7 +5,6 @@ import { getContext, setContext } from "./chatMemory.js";
 const app = express();
 app.use(express.json());
 
-}
 
 
 // ---------- One-turn size/bundle intent carry with topic switch guard ----------
