@@ -1,4 +1,10 @@
 import express from "express";
+import { readFile } from "fs/promises";
+import { getContext, setContext } from "./chatMemory.js";
+
+const app = express();
+app.use(express.json());
+
 }
 
 
